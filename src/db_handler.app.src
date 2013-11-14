@@ -1,0 +1,13 @@
+{application, db_handler,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  epgsql
+                 ]},
+  {mod, { db_handler_app, []}},
+  {env, []}
+ ]}.
