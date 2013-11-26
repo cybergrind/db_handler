@@ -2,10 +2,11 @@
  [
   {description, ""},
   {vsn, "1"},
-  {registered, []},
+  {registered, [db_manager]},
   {applications, [
                   kernel,
                   stdlib,
+                  lager,
                   epgsql
                  ]},
   {mod, { db_handler_app, []}},

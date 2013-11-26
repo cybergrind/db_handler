@@ -5,83 +5,89 @@
 -export([init/1, handle_cast/2, handle_call/3, handle_info/2]).
 -export([code_change/3, terminate/2]).
 -export([start_link/0]).
--export([cast_query/3]).
+-export([cast_query/4]).
 
--define(START_WORKERS, 5).
--record(dbm_state, {queue,
-                    sql_queue}).
+%% Helper macro for declaring children of supervisor
+-define(CHILD(Id, I, Opts), {Id, {I, start_link, Opts}, temporary, brutal_kill, worker, [I]}).
+-define(DEFAULT_WORKERS, 2).
+
+-record(dbm_state, {queues, sql_queues, refs}).
+
 
 start_link() ->
     gen_server:start_link({local, db_manager}, ?MODULE, [], []).
 
 init([]) ->
-    self() ! {start_workers},
-    Q = queue:new(),
-    {ok, #dbm_state{queue=Q, sql_queue=queue:new()}}.
+    self() ! start_workers,
+    {ok, #dbm_state{queues=dict:new(), sql_queues=dict:new(),
+                    refs=ets:new(set, [])}}.
 
-start_worker(Num) ->
-  case Num > 0 of
-    true ->
-      lager:debug("start child~n"),
-      case supervisor:start_child({db_worker_sup, node()}, [self()]) of
-        {ok, Pid} ->
-          _Ref = erlang:monitor(process, Pid);
-        {error, Error} ->
-          error_logger:error_msg("Cannot start child ~p", [Error])
-      end,
-      start_worker(Num - 1);
-    false ->
-      ok
-  end.
+cast_query(Name, Query, Params, ReturnParams) ->
+  gen_server:cast(db_manager, {sql_query, Name, Query, Params, {param_sql_cast, self(), ReturnParams}}).
 
-cast_query(Query, Params, ReturnParams) ->
-  gen_server:cast(db_manager, {sql_query, Query, Params, {param_sql_cast, self(), ReturnParams}}).
-
-handle_cast({db_worker, register, Pid}, #dbm_state{queue=Q1, sql_queue=SQ}=OldState) ->
+handle_cast({db_worker, register, Pid, Name},
+            #dbm_state{queues=Qs, sql_queues=SQs}=OldState) ->
+  SQ = SQs:fetch(Name),
+  Q1 = Qs:fetch(Name),
   case queue:len(SQ) > 0 of
     true ->
       {{value, Query}, SQ1} = queue:out(SQ),
       gen_server:cast(Pid, Query),
-      State = OldState#dbm_state{sql_queue=SQ1};
+      {noreply, OldState#dbm_state{sql_queues=SQs:store(Name, SQ1)}};
     false ->
       Q2 = queue:in(Pid, Q1),
-      State = OldState#dbm_state{queue=Q2}
-  end,
-  {noreply, State};
+      {noreply, OldState#dbm_state{queues=Qs:store(Name, Q2)}}
+  end;
 
-handle_cast({sql_query, Query, Par, Pid}, #dbm_state{queue=Q1, sql_queue=SQ}=OldState) ->
+handle_cast({sql_query, Name, Query, Par, Pid},
+            #dbm_state{queues=Qs, sql_queues=SQs}=OldState) ->
+  SQ = SQs:fetch(Name),
+  Q1 = Qs:fetch(Name),
   case queue:out(Q1) of
     {{value, Worker}, Q2} ->
       lager:debug("PID ~p~n", [Pid]),
       gen_server:cast(Worker, {sql_query, Query, Par, Pid}),
-      State = OldState#dbm_state{queue=Q2};
+      {noreply, OldState#dbm_state{queues=Qs:store(Name, Q2)}};
     {empty, _} ->
-      State = OldState#dbm_state{sql_queue=queue:in({sql_query, Query, Par, Pid}, SQ)}
-  end,
-  {noreply, State};
+      SQ1 = queue:in({sql_query, Query, Par, Pid}, SQ),
+      {noreply, OldState#dbm_state{sql_queues=SQs:store(Name, SQ1)}}
+  end;
 
 handle_cast(_, State) ->
     {noreply, State}.
 
-handle_call({get_queue}, _From, State) ->
-  {reply, State#dbm_state.queue, State};
-handle_call({cast, Sql, Params, Ident}, From, State) ->
-  gen_server:cast(self(), {sql_query, Sql, Params, {param_sql_cast, From, Ident}}),
+handle_call({cast, Name, Sql, Params, Ident}, From, State) ->
+  gen_server:cast(self(), {sql_query, Name, Sql, Params, {param_sql_cast, From, Ident}}),
   {reply, ok, State};
-handle_call({Sql, Params, Ident}, From, State) ->
-  gen_server:cast(self(), {sql_query, Sql, Params, {param_sql, From, Ident}}),
+handle_call({Name, Sql, Params, Ident}, From, State) ->
+  gen_server:cast(self(), {sql_query, Name, Sql, Params, {param_sql, From, Ident}}),
   {reply, ok, State};
 handle_call(_, _, State) ->
   {noreply, State}.
 
-handle_info({start_workers}, State) ->
-    start_worker(?START_WORKERS),
-    {noreply, State};
-handle_info({'DOWN', _Ref, process, _Pid, _}, #dbm_state{queue=Q1}=State) ->
-    Q2 = queue:filter(fun(P) -> P =/= _Pid end, Q1),
-    {noreply, State#dbm_state{queue=Q2}};
-handle_info(_, State) ->
-    {noreply, State}.
+handle_info(start_workers, State) ->
+    case application:get_env(connections) of
+      undefined ->
+        {noreply, State};
+      {ok, ConnList} ->
+        Names = [Name || {Name, _, _, _} <- ConnList],
+        NewState = lists:foldl(fun check_name/2, State, Names),
+        [handle_params(Name, Type, Args, Opts, NewState) ||
+          {Name, Type, Args, Opts} <- ConnList],
+        {noreply, NewState}
+    end;
+
+handle_info({'DOWN', Ref, process, _Pid, _}, #dbm_state{refs=Tbl, queues=Qs}=State) ->
+  case ets:lookup(Tbl, Ref) of
+    [] -> {noreply, State};
+    [{Ref, Name}] ->
+      Q1 = Qs:fetch(Name),
+      Q2 = queue:filter(fun(P) -> P =/= _Pid end, Q1),
+      {noreply, State#dbm_state{queues=Qs:store(Name, Q2)}}
+  end;
+handle_info(Req, State) ->
+  lager:warning("Unhandled info ~p", [Req]),
+  {noreply, State}.
 
 terminate(_, _) ->
     ok.
@@ -89,3 +95,28 @@ terminate(_, _) ->
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
+check_name(Name, #dbm_state{queues=Qs, sql_queues=SQs}=State) ->
+  lager:info("Try to register name ~p", [Name]),
+  case Qs:find(Name) of
+    error ->
+      State#dbm_state{queues = Qs:store(Name, queue:new()),
+                      sql_queues = SQs:store(Name, queue:new())};
+    _ -> State
+  end.
+
+handle_params(Name, Type, Args, Opts, #dbm_state{refs=Tbl}=_State) ->
+  Host = proplists:get_value(host, Args),
+  User = proplists:get_value(user, Args),
+  Pw = proplists:get_value(password, Args),
+  Database = proplists:get_value(database, Args),
+  NumWorkers = proplists:get_value(workers, Opts, ?DEFAULT_WORKERS),
+  [start_worker(Type, Tbl, Name, Num, Host, User, Pw, Database) ||
+    Num <- lists:seq(1, NumWorkers)].
+
+start_worker(pg, Tbl, Name, Num, Host, User, Pw, Database) ->
+  C = ?CHILD({Name, Num}, pg_worker, [[Name, Host, User, Pw, Database, self()]]),
+  lager:debug("start pg_worker ~p", [Name]),
+  {ok, Pid} = supervisor:start_child(db_worker_sup, C),
+  Ref = erlang:monitor(process, Pid),
+  ets:insert(Tbl, {Ref, Name}).
+  
