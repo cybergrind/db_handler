@@ -5,7 +5,7 @@
 -export([init/1, handle_cast/2, handle_call/3, handle_info/2]).
 -export([code_change/3, terminate/2]).
 -export([start_link/0]).
--export([cast_query/4]).
+-export([cast_query/4, add_worker/1]).
 
 %% Helper macro for declaring children of supervisor
 -define(CHILD(Id, I, Opts), {Id, {I, start_link, Opts}, temporary, brutal_kill, worker, [I]}).
@@ -25,6 +25,14 @@ init([]) ->
 cast_query(Name, Query, Params, ReturnParams) ->
   gen_server:cast(db_manager, {sql_query, Name, Query, Params, {param_sql_cast, self(), ReturnParams}}).
 
+add_worker(WorkerSpec) ->
+  gen_server:cast(db_manager, {add_worker, WorkerSpec}).
+
+handle_cast({add_worker, WorkerSpec}, State) ->
+  {Name, Type, Args, Opts} = WorkerSpec,
+  NewState = lists:foldl(fun check_name/2, State, [Name]),
+  handle_params(Name, Type, Args, Opts, NewState),
+  {noreply, NewState};
 handle_cast({db_worker, register, Pid, Name},
             #dbm_state{queues=Qs, sql_queues=SQs}=OldState) ->
   SQ = SQs:fetch(Name),
@@ -122,9 +130,13 @@ handle_params(Name, Type, Args, Opts, #dbm_state{refs=Tbl}=_State) ->
 start_worker(pg, Tbl, Name, Num, Host, User, Pw, Database) ->
   C = ?CHILD({Name, Num}, pg_worker, [[Name, Host, User, Pw, Database, self()]]),
   lager:debug("start pg_worker ~p", [Name]),
-  {ok, Pid} = supervisor:start_child(db_worker_sup, C),
-  Ref = erlang:monitor(process, Pid),
-  lager:warning("MonRef ~p", [Ref]),
-  AllOpts = [pg, Tbl, Name, Num, Host, User, Pw, Database],
-  ets:insert(Tbl, {Ref, Name, AllOpts}).
+  case supervisor:start_child(db_worker_sup, C) of
+    {ok, Pid} ->
+      Ref = erlang:monitor(process, Pid),
+      lager:warning("MonRef ~p", [Ref]),
+      AllOpts = [pg, Tbl, Name, Num, Host, User, Pw, Database],
+      ets:insert(Tbl, {Ref, Name, AllOpts});
+    {error, Rsn} ->
+      lager:error("Cannot start worker ~p => ~p", [Name, Rsn])
+  end.
   
