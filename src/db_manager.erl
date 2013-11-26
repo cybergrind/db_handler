@@ -9,10 +9,10 @@
 
 %% Helper macro for declaring children of supervisor
 -define(CHILD(Id, I, Opts), {Id, {I, start_link, Opts}, temporary, brutal_kill, worker, [I]}).
--define(DEFAULT_WORKERS, 2).
+-define(DEFAULT_WORKERS, 1).
+-define(RESTART_MS, 2000).
 
 -record(dbm_state, {queues, sql_queues, refs}).
-
 
 start_link() ->
     gen_server:start_link({local, db_manager}, ?MODULE, [], []).
@@ -77,14 +77,20 @@ handle_info(start_workers, State) ->
         {noreply, NewState}
     end;
 
-handle_info({'DOWN', Ref, process, _Pid, _}, #dbm_state{refs=Tbl, queues=Qs}=State) ->
+handle_info({'DOWN', Ref, process, _Pid, Rsn}, #dbm_state{refs=Tbl, queues=Qs}=State) ->
   case ets:lookup(Tbl, Ref) of
     [] -> {noreply, State};
-    [{Ref, Name}] ->
+    [{Ref, Name, AllParams}] ->
       Q1 = Qs:fetch(Name),
       Q2 = queue:filter(fun(P) -> P =/= _Pid end, Q1),
+      lager:warning("Got 'DOWN' from ~p worker => ~p", [lists:nth(3, AllParams),
+                                                        Rsn]),
+      timer:send_after(?RESTART_MS, self(), {restart_worker, AllParams}),
       {noreply, State#dbm_state{queues=Qs:store(Name, Q2)}}
   end;
+handle_info({restart_worker, AllParams}, State) ->
+  erlang:apply(fun start_worker/8, AllParams),
+  {noreply, State};
 handle_info(Req, State) ->
   lager:warning("Unhandled info ~p", [Req]),
   {noreply, State}.
@@ -118,5 +124,7 @@ start_worker(pg, Tbl, Name, Num, Host, User, Pw, Database) ->
   lager:debug("start pg_worker ~p", [Name]),
   {ok, Pid} = supervisor:start_child(db_worker_sup, C),
   Ref = erlang:monitor(process, Pid),
-  ets:insert(Tbl, {Ref, Name}).
+  lager:warning("MonRef ~p", [Ref]),
+  AllOpts = [pg, Tbl, Name, Num, Host, User, Pw, Database],
+  ets:insert(Tbl, {Ref, Name, AllOpts}).
   
