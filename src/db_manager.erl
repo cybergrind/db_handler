@@ -7,8 +7,6 @@
 -export([start_link/0]).
 -export([cast_query/4, add_worker/1]).
 
-%% Helper macro for declaring children of supervisor
--define(CHILD(Id, I, Opts), {Id, {I, start_link, Opts}, temporary, brutal_kill, worker, [I]}).
 -define(DEFAULT_WORKERS, 1).
 -define(RESTART_MS, 2000).
 
@@ -19,50 +17,36 @@ start_link() ->
 
 init([]) ->
     self() ! start_workers,
-    {ok, #dbm_state{queues=dict:new(), sql_queues=dict:new(),
-                    refs=ets:new(set, [])}}.
+    {ok, #dbm_state{refs=ets:new(set, [])}}.
 
+% db_manager:cast_query(test1, "select 1;", [], ret).
 cast_query(Name, Query, Params, ReturnParams) ->
   gen_server:cast(db_manager, {sql_query, Name, Query, Params, {param_sql_cast, self(), ReturnParams}}).
+
 
 add_worker(WorkerSpec) ->
   gen_server:cast(db_manager, {add_worker, WorkerSpec}).
 
 handle_cast({add_worker, WorkerSpec}, State) ->
   {Name, Type, Args, Opts} = WorkerSpec,
-  NewState = lists:foldl(fun check_name/2, State, [Name]),
-  handle_params(Name, Type, Args, Opts, NewState),
-  {noreply, NewState};
-handle_cast({db_worker, register, Pid, Name},
-            #dbm_state{queues=Qs, sql_queues=SQs}=OldState) ->
-  SQ = SQs:fetch(Name),
-  Q1 = Qs:fetch(Name),
-  case queue:len(SQ) > 0 of
-    true ->
-      {{value, Query}, SQ1} = queue:out(SQ),
-      gen_server:cast(Pid, Query),
-      {noreply, OldState#dbm_state{sql_queues=SQs:store(Name, SQ1)}};
-    false ->
-      Q2 = queue:in(Pid, Q1),
-      {noreply, OldState#dbm_state{queues=Qs:store(Name, Q2)}}
-  end;
+  handle_params(Name, Type, Args, Opts, State),
+  {noreply, State};
 
 handle_cast({sql_query, Name, Query, Par, Pid},
-            #dbm_state{queues=Qs, sql_queues=SQs}=OldState) ->
-  SQ = SQs:fetch(Name),
-  Q1 = Qs:fetch(Name),
-  case queue:out(Q1) of
-    {{value, Worker}, Q2} ->
-      lager:debug("PID ~p~n", [Pid]),
+            State) ->
+  case poolboy:checkout(Name, false) of
+    full ->
+      % TODO: handle full queues in separate process
+      {noreply, State};
+    Worker ->
+      lager:info("Get worker ~p", [Worker]),
       gen_server:cast(Worker, {sql_query, Query, Par, Pid}),
-      {noreply, OldState#dbm_state{queues=Qs:store(Name, Q2)}};
-    {empty, _} ->
-      SQ1 = queue:in({sql_query, Query, Par, Pid}, SQ),
-      {noreply, OldState#dbm_state{sql_queues=SQs:store(Name, SQ1)}}
-  end;
+      lager:info("Cast called"),
+      {noreply, State};
 
-handle_cast(_, State) ->
-    {noreply, State}.
+handle_cast(Req, State) ->
+  lager:warning("Unhandled cast ~p", [Req]),
+  {noreply, State}.
 
 handle_call({cast, Name, Sql, Params, Ident}, From, State) ->
   gen_server:cast(self(), {sql_query, Name, Sql, Params, {param_sql_cast, From, Ident}}),
@@ -74,31 +58,15 @@ handle_call(_, _, State) ->
   {noreply, State}.
 
 handle_info(start_workers, State) ->
-    case application:get_env(connections) of
-      undefined ->
-        {noreply, State};
-      {ok, ConnList} ->
-        Names = [Name || {Name, _, _, _} <- ConnList],
-        NewState = lists:foldl(fun check_name/2, State, Names),
-        [handle_params(Name, Type, Args, Opts, NewState) ||
-          {Name, Type, Args, Opts} <- ConnList],
-        {noreply, NewState}
-    end;
-
-handle_info({'DOWN', Ref, process, _Pid, Rsn}, #dbm_state{refs=Tbl, queues=Qs}=State) ->
-  case ets:lookup(Tbl, Ref) of
-    [] -> {noreply, State};
-    [{Ref, Name, AllParams}] ->
-      Q1 = Qs:fetch(Name),
-      Q2 = queue:filter(fun(P) -> P =/= _Pid end, Q1),
-      lager:warning("Got 'DOWN' from ~p worker => ~p", [lists:nth(3, AllParams),
-                                                        Rsn]),
-      timer:send_after(?RESTART_MS, self(), {restart_worker, AllParams}),
-      {noreply, State#dbm_state{queues=Qs:store(Name, Q2)}}
+  case application:get_env(connections) of
+    undefined ->
+      {noreply, State};
+    {ok, ConnList} ->
+      [handle_params(Name, Type, Args, Opts, State) ||
+        {Name, Type, Args, Opts} <- ConnList],
+      {noreply, State}
   end;
-handle_info({restart_worker, AllParams}, State) ->
-  erlang:apply(fun start_worker/8, AllParams),
-  {noreply, State};
+
 handle_info(Req, State) ->
   lager:warning("Unhandled info ~p", [Req]),
   {noreply, State}.
@@ -109,34 +77,12 @@ terminate(_, _) ->
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
-check_name(Name, #dbm_state{queues=Qs, sql_queues=SQs}=State) ->
-  lager:info("Try to register name ~p", [Name]),
-  case Qs:find(Name) of
-    error ->
-      State#dbm_state{queues = Qs:store(Name, queue:new()),
-                      sql_queues = SQs:store(Name, queue:new())};
-    _ -> State
-  end.
-
-handle_params(Name, Type, Args, Opts, #dbm_state{refs=Tbl}=_State) ->
-  Host = proplists:get_value(host, Args),
-  User = proplists:get_value(user, Args),
-  Pw = proplists:get_value(password, Args),
-  Database = proplists:get_value(database, Args),
-  NumWorkers = proplists:get_value(workers, Opts, ?DEFAULT_WORKERS),
-  [start_worker(Type, Tbl, Name, Num, Host, User, Pw, Database) ||
-    Num <- lists:seq(1, NumWorkers)].
-
-start_worker(pg, Tbl, Name, Num, Host, User, Pw, Database) ->
-  C = ?CHILD({Name, Num}, pg_worker, [[Name, Host, User, Pw, Database, self()]]),
-  lager:debug("start pg_worker ~p", [Name]),
-  case supervisor:start_child(db_worker_sup, C) of
-    {ok, Pid} ->
-      Ref = erlang:monitor(process, Pid),
-      lager:warning("MonRef ~p", [Ref]),
-      AllOpts = [pg, Tbl, Name, Num, Host, User, Pw, Database],
-      ets:insert(Tbl, {Ref, Name, AllOpts});
-    {error, Rsn} ->
-      lager:error("Cannot start worker ~p => ~p", [Name, Rsn])
-  end.
-  
+handle_params(Name, Type, Args, Opts, _State) ->
+  WorkerModule =
+    case Type of
+        pg -> pg_worker end,
+  Spec = poolboy:child_spec(Name, [{name, {local, Name}},
+                                   {worker_module, WorkerModule} | Opts],
+                            [{name, Name} | Args]),
+  lager:info("start ~p", [Spec]),
+  {ok, _Pid} = supervisor:start_child(db_worker_sup, Spec).

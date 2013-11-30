@@ -5,7 +5,7 @@
 -export([init/1, handle_cast/2, handle_call/3, handle_info/2]).
 -export([code_change/3, terminate/2]).
 -export([start_link/1]).
-
+-import(proplists, [get_value/3, get_value/2]).
 -record(db_state, {name, connection,
                    manager}).
 
@@ -23,9 +23,14 @@ connect(Host, User, Pass, Opts) ->
 start_link(Args) ->
     gen_server:start_link(?MODULE, Args, []).
 
-init([Name, Host, User, Pass, Database, Manager]) ->
+init(Params) ->
+  Name = get_value(name, Params, default),
+  Host = get_value(host, Params, "localhost"),
+  User = get_value(user, Params, "postgres"),
+  Pass = get_value(password, Params),
+  Database = get_value(database, Params),
   gen_server:cast(self(), {connect, Host, User, Pass, Database}),
-  {ok, #db_state{name=Name, manager=Manager}}.
+  {ok, #db_state{name=Name, manager=no_manager}}.
 
 handle_cast({connect, Host, User, Pass, Database},
             #db_state{name=Name, manager=Manager}=State) ->
@@ -34,12 +39,13 @@ handle_cast({connect, Host, User, Pass, Database},
   gen_server:cast(Manager, {db_worker, register, self(), Name}),
   {noreply, NewState};
 handle_cast({sql_query, Query, Params, {param_sql_cast, Pid, QParams}},
-             #db_state{name=Name, connection=C, manager=Manager}=State) ->
+             #db_state{name=Name, connection=C}=State) ->
   lager:debug("Handle new type query cast"),
   Result = pgsql:equery(C, Query, Params),
   lager:debug("Send result ~p to ~p~n", [Result, Pid]),
   gen_server:cast(Pid, {QParams, Result}),
-  gen_server:cast(Manager, {db_worker, register, self(), Name}),
+  poolboy:checkin(Name, self()),
+  lager:debug("Checkin ok ~p", [Name]),
   {noreply, State};
 handle_cast({sql_query, Query, Params, {param_sql, Pid, QParams}},
              #db_state{name=Name, connection=C, manager=Manager}=State) ->
@@ -60,6 +66,13 @@ handle_cast(Req, State) ->
   lager:warning("Unhandled cast ~p", [Req]),
   {noreply, State}.
 
+handle_call({sql_query, Query, Params, {param_sql_cast, Pid, QParams}}, _,
+             #db_state{connection=C}=State) ->
+  lager:debug("Handle new type query cast"),
+  Result = pgsql:equery(C, Query, Params),
+  lager:debug("Send result ~p to ~p~n", [Result, Pid]),
+  gen_server:cast(Pid, {QParams, Result}),
+  {reply, ok, State};
 handle_call(Req, _, State) ->
   lager:warning("Unhandled call ~p", [Req]),
   {noreply, State}.
