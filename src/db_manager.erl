@@ -42,7 +42,7 @@ handle_cast({sql_query, Name, Query, Par, Pid},
       lager:info("Get worker ~p", [Worker]),
       gen_server:cast(Worker, {sql_query, Query, Par, Pid}),
       lager:info("Cast called"),
-      {noreply, State};
+      {noreply, State} end;
 
 handle_cast(Req, State) ->
   lager:warning("Unhandled cast ~p", [Req]),
