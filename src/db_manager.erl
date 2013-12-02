@@ -6,9 +6,11 @@
 -export([code_change/3, terminate/2]).
 -export([start_link/0]).
 -export([cast_query/4, add_worker/1]).
+-export([sync_send/1]).
 
 -define(DEFAULT_WORKERS, 1).
 -define(RESTART_MS, 2000).
+
 
 -record(dbm_state, {queues, sql_queues, refs}).
 
@@ -16,10 +18,12 @@ start_link() ->
     gen_server:start_link({local, db_manager}, ?MODULE, [], []).
 
 init([]) ->
-    self() ! start_workers,
-    {ok, #dbm_state{refs=ets:new(set, [])}}.
+  lager:debug("init db_manager"),
+  self() ! start_workers,
+  {ok, #dbm_state{refs=ets:new(set, [])}}.
 
 % db_manager:cast_query(test1, "select 1;", [], ret).
+% [db_manager:cast_query(test1, "select 1;", [], ret) || X <- lists:seq(1, 10)].
 cast_query(Name, Query, Params, ReturnParams) ->
   gen_server:cast(db_manager, {sql_query, Name, Query, Params, {param_sql_cast, self(), ReturnParams}}).
 
@@ -27,21 +31,25 @@ cast_query(Name, Query, Params, ReturnParams) ->
 add_worker(WorkerSpec) ->
   gen_server:cast(db_manager, {add_worker, WorkerSpec}).
 
+sync_send({sql_query, Name, Query, Par, Pid})->
+  Worker = poolboy:checkout(Name, true, infinity),
+  gen_server:call(Worker, {sql_query, Query, Par, Pid}, infinity).
+
 handle_cast({add_worker, WorkerSpec}, State) ->
   {Name, Type, Args, Opts} = WorkerSpec,
   handle_params(Name, Type, Args, Opts, State),
   {noreply, State};
 
-handle_cast({sql_query, Name, Query, Par, Pid},
+handle_cast({sql_query, Name, Query, Par, Pid}=Params,
             State) ->
   case poolboy:checkout(Name, false) of
     full ->
       % TODO: handle full queues in separate process
+      lager:debug("run into separate process due full pool"),
+      spawn(?MODULE, sync_send, [Params]),
       {noreply, State};
     Worker ->
-      lager:info("Get worker ~p", [Worker]),
       gen_server:cast(Worker, {sql_query, Query, Par, Pid}),
-      lager:info("Cast called"),
       {noreply, State} end;
 
 handle_cast(Req, State) ->

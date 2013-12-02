@@ -25,6 +25,7 @@ start_link(Args) ->
     gen_server:start_link(?MODULE, Args, []).
 
 init(Params) ->
+  lager:debug("Init pg_worker"),
   Name = get_value(name, Params, default),
   Host = get_value(host, Params, "localhost"),
   User = get_value(user, Params, "postgres"),
@@ -48,31 +49,18 @@ handle_cast({sql_query, Query, Params, {param_sql_cast, Pid, QParams}},
   poolboy:checkin(Name, self()),
   lager:debug("Checkin ok ~p", [Name]),
   {noreply, State};
-handle_cast({sql_query, Query, Params, {param_sql, Pid, QParams}},
-             #db_state{name=Name, connection=C, manager=Manager}=State) ->
-  lager:debug("Handle new type query"),
-  Result = pgsql:equery(C, Query, Params),
-  lager:debug("Send result ~p to ~p~n", [Result, Pid]),
-  Pid ! {QParams, Result},
-  gen_server:cast(Manager, {db_worker, register, self(), Name}),
-  {noreply, State};
-handle_cast({sql_query, Query, Params, Pid},
-            #db_state{name=Name, connection=C, manager=Manager}=State) ->
-  lager:debug("Old query PID ~p~n", [Pid]),
-  Result = pgsql:equery(C, Query, Params),
-  Pid ! Result,
-  gen_server:cast(Manager, {db_worker, register, self(), Name}),
-  {noreply, State};
 handle_cast(Req, State) ->
   lager:warning("Unhandled cast ~p", [Req]),
   {noreply, State}.
 
 handle_call({sql_query, Query, Params, {param_sql_cast, Pid, QParams}}, _,
-             #db_state{connection=C}=State) ->
+             #db_state{name=Name, connection=C}=State) ->
   lager:debug("Handle new type query cast"),
   Result = pgsql:equery(C, Query, Params),
   lager:debug("Send result ~p to ~p~n", [Result, Pid]),
   gen_server:cast(Pid, {QParams, Result}),
+  poolboy:checkin(Name, self()),
+  lager:debug("Call checkin ok ~p", [Name]),
   {reply, ok, State};
 handle_call(Req, _, State) ->
   lager:warning("Unhandled call ~p", [Req]),
@@ -82,7 +70,8 @@ handle_info(Req, State) ->
   lager:warning("Unhandled info ~p", [Req]),
   {noreply, State}.
 
-terminate(_, _) ->
+terminate(Rsn, _) ->
+  lager:debug("Terminate due: ~p", [Rsn]),
   timer:sleep(?SHUTDOWN_TIMEOUT),
   ok.
 
