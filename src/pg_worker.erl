@@ -1,6 +1,7 @@
 
 -module(pg_worker).
 -behaviour(gen_server).
+-behaviour(poolboy_worker).
 
 -export([init/1, handle_cast/2, handle_call/3, handle_info/2]).
 -export([code_change/3, terminate/2]).
