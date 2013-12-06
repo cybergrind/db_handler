@@ -67,6 +67,8 @@ handle_call({cast, Name, Sql, Params, Ident}, From, State) ->
 handle_call({Name, Sql, Params, Ident}, From, State) ->
   gen_server:cast(self(), {sql_query, Name, Sql, Params, {param_sql, From, Ident}}),
   {reply, ok, State};
+handle_call({set_default, Default}, _, State) ->
+  {reply, ok, State#dbm_state{default=Default}};
 handle_call(_, _, State) ->
   {noreply, State}.
 
