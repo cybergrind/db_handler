@@ -5,14 +5,14 @@
 -export([init/1, handle_cast/2, handle_call/3, handle_info/2]).
 -export([code_change/3, terminate/2]).
 -export([start_link/0]).
--export([cast_query/4, add_worker/1]).
+-export([cast_query/4, cast_query/3, add_worker/1]).
 -export([sync_send/1]).
 
 -define(DEFAULT_WORKERS, 1).
 -define(RESTART_MS, 2000).
 
 
--record(dbm_state, {queues, sql_queues, refs}).
+-record(dbm_state, {queues, sql_queues, refs, default}).
 
 start_link() ->
     gen_server:start_link({local, db_manager}, ?MODULE, [], []).
@@ -26,6 +26,8 @@ init([]) ->
 % [db_manager:cast_query(test1, "select 1;", [], ret) || X <- lists:seq(1, 10)].
 cast_query(Name, Query, Params, ReturnParams) ->
   gen_server:cast(db_manager, {sql_query, Name, Query, Params, {param_sql_cast, self(), ReturnParams}}).
+cast_query(Query, Params, ReturnParams) ->
+  gen_server:cast(db_manager, {sql_query, Query, Params, {param_sql_cast, self(), ReturnParams}}).
 
 
 add_worker(WorkerSpec) ->
@@ -40,6 +42,10 @@ handle_cast({add_worker, WorkerSpec}, State) ->
   handle_params(Name, Type, Args, Opts, State),
   {noreply, State};
 
+handle_cast({sql_query, Query, Par, Pid},
+            #dbm_state{default=Name}=State) ->
+  handle_cast({sql_query, Name, Query, Par, Pid}, State);
+
 handle_cast({sql_query, Name, Query, Par, Pid}=Params,
             State) ->
   case poolboy:checkout(Name, false) of
@@ -51,7 +57,6 @@ handle_cast({sql_query, Name, Query, Par, Pid}=Params,
     Worker ->
       gen_server:cast(Worker, {sql_query, Query, Par, Pid}),
       {noreply, State} end;
-
 handle_cast(Req, State) ->
   lager:warning("Unhandled cast ~p", [Req]),
   {noreply, State}.
@@ -72,7 +77,8 @@ handle_info(start_workers, State) ->
     {ok, ConnList} ->
       [handle_params(Name, Type, Args, Opts, State) ||
         {Name, Type, Args, Opts} <- ConnList],
-      {noreply, State}
+      [{Default, _, _, _} | _] = ConnList,
+      {noreply, State#dbm_state{default=Default}}
   end;
 
 handle_info(Req, State) ->
