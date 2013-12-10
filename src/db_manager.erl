@@ -48,10 +48,13 @@ handle_cast({sql_query, Query, Par, Pid},
 
 handle_cast({sql_query, Name, Query, Par, Pid}=Params,
             State) ->
-  case poolboy:checkout(Name, false) of
+  case catch poolboy:checkout(Name, false) of
     full ->
       % TODO: handle full queues in separate process
       lager:debug("run into separate process due full pool"),
+      spawn(?MODULE, sync_send, [Params]),
+      {noreply, State};
+    {'EXIT', {timeout, _}} ->
       spawn(?MODULE, sync_send, [Params]),
       {noreply, State};
     Worker ->
