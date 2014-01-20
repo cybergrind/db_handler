@@ -79,6 +79,8 @@ handle_info(start_workers, State) ->
   case application:get_env(connections) of
     undefined ->
       {noreply, State};
+    {ok, []} ->
+      {noreply, State};
     {ok, ConnList} ->
       [handle_params(Name, Type, Args, Opts, State) ||
         {Name, Type, Args, Opts} <- ConnList],
