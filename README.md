@@ -8,14 +8,13 @@ DB API
 
 Example: 
 
-.. code-block:: erlang
-
+```erlang
     %gen_server:cast({sql_query, Query, Params, Pid})
     2> Pid = self().
     3> gen_server:cast(db_manager, {sql_query, "SELECT 1", [], Pid}).
     14> flush().
     Shell got {ok,[{column,<<"?column?">>,int4,4,-1,1}],[{1}]}
-
+```
 
 You can use 3 main API calls:
 
