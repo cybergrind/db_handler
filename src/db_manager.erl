@@ -71,6 +71,9 @@ handle_call({Name, Sql, Params, Ident}, From, State) ->
   {reply, ok, State};
 handle_call({set_default, Default}, _, State) ->
   {reply, ok, State#dbm_state{default=Default}};
+handle_call(get_state, _, State) ->
+  % for debug purposes
+  {reply, State, State};
 handle_call(_, _, State) ->
   {noreply, State}.
 
