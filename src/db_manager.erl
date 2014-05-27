@@ -1,6 +1,6 @@
-
 -module(db_manager).
 -behaviour(gen_server).
+-vsn("1.2").
 
 -export([init/1, handle_cast/2, handle_call/3, handle_info/2]).
 -export([code_change/3, terminate/2]).
@@ -11,8 +11,7 @@
 -define(DEFAULT_WORKERS, 1).
 -define(RESTART_MS, 2000).
 
-
--record(dbm_state, {queues, sql_queues, refs, default}).
+-record(dbm_state, {default, conn_options=[]}).
 
 start_link() ->
     gen_server:start_link({local, db_manager}, ?MODULE, [], []).
@@ -20,7 +19,7 @@ start_link() ->
 init([]) ->
   lager:debug("init db_manager"),
   self() ! start_workers,
-  {ok, #dbm_state{refs=ets:new(set, [])}}.
+  {ok, #dbm_state{}}.
 
 % db_manager:cast_query(test1, "select 1;", [], ret).
 % [db_manager:cast_query(test1, "select 1;", [], ret) || X <- lists:seq(1, 10)].
@@ -82,10 +81,10 @@ handle_info(start_workers, State) ->
     {ok, []} ->
       {noreply, State};
     {ok, ConnList} ->
-      [handle_params(Name, Type, Args, Opts, State) ||
-        {Name, Type, Args, Opts} <- ConnList],
+      ConnOptions = [handle_params(Name, Type, Args, Opts, State) ||
+                      {Name, Type, Args, Opts} <- ConnList],
       [{Default, _, _, _} | _] = ConnList,
-      {noreply, State#dbm_state{default=Default}}
+      {noreply, State#dbm_state{default=Default, conn_options=ConnOptions}}
   end;
 
 handle_info(Req, State) ->
@@ -95,8 +94,23 @@ handle_info(Req, State) ->
 terminate(_, _) ->
     ok.
 
-code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
+code_change("1.2", State, _Extra) ->
+  {ok, State};
+code_change(OldVsn, State, _Extra) ->
+  % FROM: -record(dbm_state, {queues, sql_queues, refs, default})
+  % TO: -record(dbm_state, {default})
+  lager:info("Update from ~p with worker restart", [OldVsn]),
+  stop_all_childs(),
+  self() ! start_workers,
+  {ok, #dbm_state{default=element(5, State)}}.
+
+stop_all_childs() ->
+  ChildNames = [Name || {Name, _, _, _} <-
+                          supervisor:which_children(db_worker_sup) ],
+  [{supervisor:terminate_child(db_worker_sup, Name),
+    supervisor:delete_child(db_worker_sup, Name)}
+   || Name <- ChildNames],
+  ok.
 
 handle_params(Name, Type, Args, Opts, _State) ->
   WorkerModule =
@@ -106,4 +120,5 @@ handle_params(Name, Type, Args, Opts, _State) ->
                                    {worker_module, WorkerModule} | Opts],
                             [{name, Name} | Args]),
   lager:info("start ~p", [Spec]),
-  {ok, _Pid} = supervisor:start_child(db_worker_sup, Spec).
+  {ok, _Pid} = supervisor:start_child(db_worker_sup, Spec),
+  {Name, [Name, Type, Args, Opts]}.

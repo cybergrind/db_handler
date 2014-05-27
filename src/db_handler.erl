@@ -1,5 +1,5 @@
 -module(db_handler).
--export([start/0]).
+-export([start/0, restart_app/0]).
 
 
 start(App) ->
@@ -16,3 +16,8 @@ start_ok(App, {error, Reason}) ->
 start() ->
   lager:warning("start db_handler application"),
   start(db_handler).
+
+restart_app() ->
+  lager:warning("restart application"),
+  application:stop(db_handler),
+  application:start(db_handler).
