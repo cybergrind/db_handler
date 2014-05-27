@@ -17,11 +17,5 @@ stop(_State) ->
 
 config_change(Changed, New, Removed) ->
   lager:error("Change config: ~p ~p ~p", [Changed, New, Removed]),
-  case lists:any(fun (X) -> X end,
-                 [proplists:get_value(need_restart, Changed),
-                  proplists:get_value(need_restart, New)]) of
-    true ->
-      spawn(db_handler, restart_app, []);
-    false ->
-      % TODO: handle config update
-      ok end.
+  gen_server:call(db_manager, config_change),
+  ok.

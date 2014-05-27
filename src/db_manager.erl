@@ -71,6 +71,24 @@ handle_call({Name, Sql, Params, Ident}, From, State) ->
   {reply, ok, State};
 handle_call({set_default, Default}, _, State) ->
   {reply, ok, State#dbm_state{default=Default}};
+handle_call(config_change, _, #dbm_state{conn_options=OldOptions}=State) ->
+  case application:get_env(db_handler, connections) of
+    undefined ->
+      stop_all_childs(),
+      {noreply, State#dbm_state{default=undefined, conn_options=[]}};
+    {ok, []} ->
+      stop_all_childs(),
+      {noreply, State#dbm_state{default=undefined, conn_options=[]}};
+    {ok, ConnList} ->
+      NewOptions = [handle_new_params(Name, Type, Args, Opts, State) ||
+                     {Name, Type, Args, Opts} <- ConnList],
+      NewNames = [Name || {Name, _} <- NewOptions],
+      OldNames = [Name || {Name, _} <- OldOptions],
+      ToStop = lists:subtract(OldNames, NewNames),
+      lists:map(fun stop_worker/1, ToStop),
+      [{Default, _, _, _} | _] = ConnList,
+      {noreply, State#dbm_state{default=Default, conn_options=NewOptions}}
+  end;
 handle_call(get_state, _, State) ->
   % for debug purposes
   {reply, State, State};
@@ -78,7 +96,7 @@ handle_call(_, _, State) ->
   {noreply, State}.
 
 handle_info(start_workers, State) ->
-  case application:get_env(connections) of
+  case application:get_env(db_handler, connections) of
     undefined ->
       {noreply, State};
     {ok, []} ->
@@ -110,10 +128,11 @@ code_change(OldVsn, State, _Extra) ->
 stop_all_childs() ->
   ChildNames = [Name || {Name, _, _, _} <-
                           supervisor:which_children(db_worker_sup) ],
-  [{supervisor:terminate_child(db_worker_sup, Name),
-    supervisor:delete_child(db_worker_sup, Name)}
-   || Name <- ChildNames],
+  lists:map(fun stop_worker/1, ChildNames),
   ok.
+stop_worker(Name) ->
+  {supervisor:terminate_child(db_worker_sup, Name),
+   supervisor:delete_child(db_worker_sup, Name)}.
 
 handle_params(Name, Type, Args, Opts, _State) ->
   WorkerModule =
@@ -125,3 +144,17 @@ handle_params(Name, Type, Args, Opts, _State) ->
   lager:info("start ~p", [Spec]),
   {ok, _Pid} = supervisor:start_child(db_worker_sup, Spec),
   {Name, [Name, Type, Args, Opts]}.
+
+handle_new_params(Name, Type, Args, Opts,
+                  #dbm_state{conn_options=ConnOptions}=State) ->
+  OldOptions = proplists:get_value(Name, ConnOptions),
+  NewOptions = [Name, Type, Args, Opts],
+  case {OldOptions == NewOptions, OldOptions} of
+    {true, _} ->
+      {Name, [Name, Type, Args, Opts]};
+    {false, undefined} ->
+      handle_params(Name, Type, Args, Opts, State);
+    {false, _} ->
+      stop_worker(Name),
+      handle_params(Name, Type, Args, Opts, State)
+  end.
