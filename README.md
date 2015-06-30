@@ -1,14 +1,13 @@
-db_handler
-==========
+# db_handler
 
 Erlang integration with postgres
 
-DB API
-======
+## DB API
 
 See config example in `dev.config` file.
 
-Example: 
+### Basic queries
+Example:
 
 ```erlang
     %db_manager:cast_query(Query, Params, ReturnParams)
@@ -24,7 +23,7 @@ You can use 3 main API calls:
 
 **{sql_query, Query, Params, {param_sql_cast, Pid, QParams}}**
 
-Sends answer via *gen_server:cast(Pid, {QParams, Result}*. 
+Sends answer via *gen_server:cast(Pid, {QParams, Result}*.
 
 Need for handle requests with *gen_server:handle_cast*.
 
@@ -42,7 +41,7 @@ Need for handle requests with *gen_server:handle_cast*.
                      ),
       State = #user{},
       {ok, State}.
-  
+
     % user load callbacks
     handle_cast({user_load, {ok, _Columns, [FirstRow | RestRows]}},
               State) ->
@@ -57,3 +56,26 @@ Send answer with simple message (use gen_server:handle_info) - *{QParams, Result
 
 Send answer with simple messsage without additional parameters
 
+
+### Work with transactions: db_manager:with_connection
+
+*with_connection* method will automatically add `BEGIN;` and `COMMIT;` sql's
+before and after function call.
+
+It accepts: {M, F, A} or {Function, Arguments} as parameters.
+
+```erlang
+    % File version:
+    in_transaction([Connection]) ->
+        {ok, _, _} = pgsql:equery(Connection, "select 1;"),
+        {ok, _, _} = pgsql:equery(Connection, "select 2;").
+
+    db_manager:with_connection({fun in_transaction/1, []}).
+
+    $ Console version:
+    IN_TRANSACTION = fun ([Connection]) ->
+        {ok, _, _} = pgsql:equery(Connection, "select 1;"),
+        {ok, _, _} = pgsql:equery(Connection, "select 2;") end.
+
+    db_manager:with_connection({IN_TRANSACTION, []}).
+```

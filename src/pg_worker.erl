@@ -1,4 +1,3 @@
-
 -module(pg_worker).
 -behaviour(gen_server).
 -behaviour(poolboy_worker).
@@ -20,6 +19,16 @@ connect(Host, User, Pass, Opts) ->
   {ok, Connection} = Ret,
   Connection.
 
+% db_manager:with_connection({fun ([C]) -> error_logger:info_msg("OK: ~p~n", [pgsql:equery(C, "select 1;")]) end, []}).
+run_in_transaction(Conn, {F, A}) ->
+    lager:info("Run in transaction"),
+    pgsql:equery(Conn, "BEGIN;"),
+    F([Conn | A]),
+    pgsql:equery(Conn, "COMMIT;");
+run_in_transaction(Conn, {M, F, A}) ->
+    pgsql:equery(Conn, "BEGIN;"),
+    M:F([Conn | A]),
+    pgsql:equery(Conn, "COMMIT;").
 
 start_link(Args) ->
     gen_server:start_link(?MODULE, Args, []).
@@ -49,6 +58,15 @@ handle_cast({sql_query, Query, Params, {param_sql_cast, Pid, QParams}},
   poolboy:checkin(Name, self()),
   lager:debug("Checkin ok ~p", [Name]),
   {noreply, State};
+handle_cast({with_connection, MFA, From},
+            #db_state{name=Name, connection=C}=State) ->
+  case (catch run_in_transaction(C, MFA)) of
+    {'EXIT', Rsn} ->
+          lager:warning("Got error: ~p", [Rsn]),
+          gen_server:reply(From, {error, Rsn});
+    Resp -> gen_server:reply(From, Resp) end,
+  poolboy:checkin(Name, self()),
+  {noreply, State};
 handle_cast(Req, State) ->
   lager:warning("Unhandled cast ~p", [Req]),
   {noreply, State}.
@@ -77,4 +95,3 @@ terminate(Rsn, _) ->
 
 code_change(_, _, _) ->
   ok.
-

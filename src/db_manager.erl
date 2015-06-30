@@ -6,6 +6,7 @@
 -export([code_change/3, terminate/2]).
 -export([start_link/0]).
 -export([cast_query/4, cast_query/3, add_worker/1]).
+-export([with_connection/1, with_connection/2]).
 -export([sync_send/1]).
 
 -define(DEFAULT_WORKERS, 1).
@@ -27,6 +28,11 @@ cast_query(Name, Query, Params, ReturnParams) ->
   gen_server:cast(db_manager, {sql_query, Name, Query, Params, {param_sql_cast, self(), ReturnParams}}).
 cast_query(Query, Params, ReturnParams) ->
   gen_server:cast(db_manager, {sql_query, Query, Params, {param_sql_cast, self(), ReturnParams}}).
+
+with_connection(MFA) ->
+    gen_server:call(db_manager, {with_connection, default, MFA}).
+with_connection(MFA, Name) ->
+    gen_server:call(db_manager, {with_connection, Name, MFA}).
 
 
 add_worker(WorkerSpec) ->
@@ -69,6 +75,12 @@ handle_call({cast, Name, Sql, Params, Ident}, From, State) ->
 handle_call({Name, Sql, Params, Ident}, From, State) ->
   gen_server:cast(self(), {sql_query, Name, Sql, Params, {param_sql, From, Ident}}),
   {reply, ok, State};
+handle_call({with_connection, Name, MFA}, From, State) ->
+  case catch poolboy:checkout(Name, true, 5000) of
+      {'EXIT', Rsn} -> {reply, {error, Rsn}, State};
+      Worker ->
+          gen_server:cast(Worker, {with_connection, MFA, From}),
+          {noreply, State} end;
 handle_call({set_default, Default}, _, State) ->
   {reply, ok, State#dbm_state{default=Default}};
 handle_call(config_change, _, #dbm_state{conn_options=OldOptions}=State) ->
@@ -92,7 +104,8 @@ handle_call(config_change, _, #dbm_state{conn_options=OldOptions}=State) ->
 handle_call(get_state, _, State) ->
   % for debug purposes
   {reply, State, State};
-handle_call(_, _, State) ->
+handle_call(Msg, _, State) ->
+  lager:warning("Unhandled call: ~p", [Msg]),
   {noreply, State}.
 
 handle_info(start_workers, State) ->
