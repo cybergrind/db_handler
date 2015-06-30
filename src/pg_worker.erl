@@ -21,7 +21,6 @@ connect(Host, User, Pass, Opts) ->
 
 % db_manager:with_connection({fun ([C]) -> error_logger:info_msg("OK: ~p~n", [pgsql:equery(C, "select 1;")]) end, []}).
 run_in_transaction(Conn, {F, A}) ->
-    lager:info("Run in transaction"),
     pgsql:equery(Conn, "BEGIN;"),
     F([Conn | A]),
     pgsql:equery(Conn, "COMMIT;");
