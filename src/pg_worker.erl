@@ -22,12 +22,14 @@ connect(Host, User, Pass, Opts) ->
 % db_manager:with_connection({fun ([C]) -> error_logger:info_msg("OK: ~p~n", [pgsql:equery(C, "select 1;")]) end, []}).
 run_in_transaction(Conn, {F, A}) ->
     pgsql:equery(Conn, "BEGIN;"),
-    F([Conn | A]),
-    pgsql:equery(Conn, "COMMIT;");
+    Res = F([Conn | A]),
+    TransRes = pgsql:equery(Conn, "COMMIT;"),
+    {TransRes, Res};
 run_in_transaction(Conn, {M, F, A}) ->
     pgsql:equery(Conn, "BEGIN;"),
-    M:F([Conn | A]),
-    pgsql:equery(Conn, "COMMIT;").
+    Res = M:F([Conn | A]),
+    TransRes = pgsql:equery(Conn, "COMMIT;"),
+    {TransRes, Res}.
 
 start_link(Args) ->
     gen_server:start_link(?MODULE, Args, []).
