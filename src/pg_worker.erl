@@ -66,6 +66,7 @@ handle_cast({with_connection, MFA, From},
           lager:warning("Got error: ~p", [Rsn]),
           gen_server:reply(From, {error, Rsn});
     Resp -> gen_server:reply(From, Resp) end,
+  pgsql:equery(C, "ROLLBACK;"),
   poolboy:checkin(Name, self()),
   {noreply, State};
 handle_cast(Req, State) ->
