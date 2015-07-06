@@ -47,7 +47,9 @@ init(Params) ->
 handle_cast({connect, Host, User, Pass, Database},
             #db_state{name=Name, manager=Manager}=State) ->
   Opts = [{database, Database}],
-  NewState = State#db_state{connection=connect(Host, User, Pass, Opts)},
+  Conn = connect(Host, User, Pass, Opts),
+  link(Conn),
+  NewState = State#db_state{connection=Conn},
   gen_server:cast(Manager, {db_worker, register, self(), Name}),
   {noreply, NewState};
 handle_cast({sql_query, Query, Params, {param_sql_cast, Pid, QParams}},
@@ -86,6 +88,9 @@ handle_call(Req, _, State) ->
   lager:warning("Unhandled call ~p", [Req]),
   {noreply, State}.
 
+handle_info({'EXIT', _, sock_closed}, State) ->
+  timer:sleep(1000),
+  {stop, connection_closed, State};
 handle_info(Req, State) ->
   lager:warning("Unhandled info ~p", [Req]),
   {noreply, State}.
