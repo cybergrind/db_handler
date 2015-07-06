@@ -1,7 +1,7 @@
 {application, db_handler,
  [
   {description, ""},
-  {vsn, "1.4"},
+  {vsn, "1.5.0"},
   {registered, [db_manager]},
   {applications, [
                   kernel,
